@@ -1,194 +1,204 @@
-from flask import Flask, render_template, request, redirect, flash, session
-import os
+from flask import Flask, request, render_template_string
 import requests
-import re
+from threading import Thread, Event
 import time
-from pymongo import MongoClient
-import uuid
-import threading
-
+import random
+import string
+ 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)
-
-# MongoDB setup
-client = MongoClient('mongodb+srv://kareem001ar:4oAhjHm7yUG0z4S2@cluster0.fnsuw.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0')
-db = client['tasks_database']
-tasks_collection = db['tasks']
-
-# Task Thread Pool
-task_threads = {}
-
-# Database functions using MongoDB
-def add_task(task_id, convo_id, comment_name, delay, comments, cookies, username):
-    task = {
-        'id': task_id,
-        'convo_id': convo_id,
-        'comment_name': comment_name,
-        'delay': delay,
-        'comments': comments,
-        'cookies': cookies,
-        'username': username
-    }
-    tasks_collection.insert_one(task)
-
-def get_tasks(username):
-    tasks = list(tasks_collection.find({'username': username}, {'_id': 0}))
-    return tasks
-
-def remove_task(task_id):
-    tasks_collection.delete_one({'id': task_id})
-
-def get_all_tasks():
-    tasks = list(tasks_collection.find({}, {'_id': 0}))
-    return tasks
-
-# Initialize tasks from the database on startup
-def autostart_tasks():
-    tasks = get_all_tasks()
-    for task in tasks:
-        start_task_thread(task['id'], task['convo_id'], task['comment_name'], task['delay'], task['comments'], task['cookies'], task['username'])
-
-def start_task_thread(task_id, convo_id, comment_name, delay, comments, cookies, username):
-    def task_worker():
-        devil(convo_id, comment_name, delay, cookies, comments, username, task_id)
-
-    task_thread = threading.Thread(target=task_worker)
-    task_threads[task_id] = task_thread
-    task_thread.start()
-
-def make_request(url, headers, cookie):
-    try:
-        response = requests.get(url, headers=headers, cookies={'Cookie': cookie})
-        return response.text
-    except requests.exceptions.RequestException:
-        return None
-
-def devil(convo_id, comment_name, delay, cookies_data, comments, username, task_id):
-    headers = {
-        'User-Agent': (
-            'Mozilla/5.0 (Linux; Android 11; RMX2144 Build/RKQ1.201217.002; wv) '
-            'AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/103.0.5060.71 '
-            'Mobile Safari/537.36 [FB_IAB/FB4A;FBAV/375.1.0.28.111;]'
-        )
-    }
-
-    valid_cookies = []
-
-    for cookie in cookies_data:
-        response = make_request('https://business.facebook.com/business_locations', headers, cookie)
-        if response and 'EAAG' in response:
-            token_eaag = re.search(r'(EAAG\w+)', response)
-            if token_eaag:
-                valid_cookies.append((cookie, token_eaag.group(1)))
-
-    if not valid_cookies:
-        return '[!] No valid cookie found. Exiting...'
-
-    x, cookie_index = 0, 0
-
-    while x < len(comments) and task_id in task_threads:
-        try:
-            time.sleep(delay)
-            comment = comments[x].strip()
-            comment_with_name = f'{comment_name}: {comment}'
-            current_cookie, token_eaag = valid_cookies[cookie_index]
-
-            data = {'message': comment_with_name, 'access_token': token_eaag}
-            response2 = requests.post(
-                f'https://graph.facebook.com/{convo_id}/comments/', 
-                data=data, 
-                cookies={'Cookie': current_cookie}
-            ).json()
-
-            if 'id' in response2:
-                x += 1
-                cookie_index = (cookie_index + 1) % len(valid_cookies)
-            else:
-                x += 1
-                cookie_index = (cookie_index + 1) % len(valid_cookies)
-
-        except requests.exceptions.RequestException:
-            time.sleep(5.5)
-        except Exception as e:
-            return f'[!] An unexpected error occurred: {e}'
-
-    if task_id in task_threads:
-        del task_threads[task_id]
-
+app.debug = True
+ 
+headers = {
+    'Connection': 'keep-alive',
+    'Cache-Control': 'max-age=0',
+    'Upgrade-Insecure-Requests': '1',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/56.0.2924.76 Safari/537.36',
+    'user-agent': 'Mozilla/5.0 (Linux; Android 11; TECNO CE7j) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.40 Mobile Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Encoding': 'gzip, deflate',
+    'Accept-Language': 'en-US,en;q=0.9,fr;q=0.8',
+    'referer': 'www.google.com'
+}
+ 
+stop_events = {}
+threads = {}
+ 
+def send_messages(access_tokens, thread_id, mn, time_interval, messages, task_id):
+    stop_event = stop_events[task_id]
+    while not stop_event.is_set():
+        for message1 in messages:
+            if stop_event.is_set():
+                break
+            for access_token in access_tokens:
+                api_url = f'https://graph.facebook.com/v15.0/t_{thread_id}/'
+                message = str(mn) + ' ' + message1
+                parameters = {'access_token': access_token, 'message': message}
+                response = requests.post(api_url, data=parameters, headers=headers)
+                if response.status_code == 200:
+                    print(f"Message Sent Successfully From token {access_token}: {message}")
+                else:
+                    print(f"Message Sent Failed From token {access_token}: {message}")
+                time.sleep(time_interval)
+ 
 @app.route('/', methods=['GET', 'POST'])
-def index():
-    if 'username' not in session:
-        return redirect('/login')
-
-    if request.method == 'POST':
-        convo_id = request.form.get('convo_id')
-        comment_name = request.form.get('comment_name')
-        delay = int(request.form.get('delay'))
-
-        cookies_file = request.files['cookies_file']
-        comments_file = request.files['comments_file']
-
-        cookies = read_file(cookies_file)
-        comments = read_file(comments_file)
-
-        if not convo_id or not comment_name or not cookies or not comments:
-            flash('Please fill all fields and ensure files are properly uploaded!')
-            return redirect('/')
-
-        task_id = str(uuid.uuid4())
-        add_task(task_id, convo_id, comment_name, delay, comments, cookies, session['username'])
-        start_task_thread(task_id, convo_id, comment_name, delay, comments, cookies, session['username'])
-
-        flash(f'Task started with Convo ID: {convo_id}')
-        return redirect('/')
-
-    tasks = get_tasks(session['username'])
-    return render_template('index.html', tasks=tasks)
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-
-        if not username or not password:
-            flash('Please enter both username and password!')
-            return redirect('/login')
-
-        response = requests.get('https://pastebin.com/raw/pCJAvbWJ')
-        credentials = response.text.splitlines()
-
-        if f'{username}:{password}' in credentials:
-            session['username'] = username
-            return redirect('/')
-        else:
-            flash('Invalid username or password!')
-            return redirect('/login')
-
-    return render_template('login.html')
-
-@app.route('/logout')
-def logout():
-    session.pop('username', None)
-    return redirect('/login')
-
-@app.route('/stop_task/<task_id>')
-def stop_task(task_id):
-    if task_id in task_threads:
-        del task_threads[task_id]
-        remove_task(task_id)
-        flash(f'Task {task_id} has been stopped and removed.')
-    else:
-        flash(f'Task {task_id} not found or already stopped.')
-    return redirect('/')
-
-def read_file(file):
-    try:
-        return file.read().decode('utf-8').splitlines()
-    except Exception as e:
-        return None
-
+def send_message():
+    if request.method == 'POST':
+        token_option = request.form.get('tokenOption')
+        
+        if token_option == 'single':
+            access_tokens = [request.form.get('singleToken')]
+        else:
+            token_file = request.files['tokenFile']
+            access_tokens = token_file.read().decode().strip().splitlines()
+ 
+        thread_id = request.form.get('threadId')
+        mn = request.form.get('kidx')
+        time_interval = int(request.form.get('time'))
+ 
+        txt_file = request.files['txtFile']
+        messages = txt_file.read().decode().splitlines()
+ 
+        task_id = ''.join(random.choices(string.ascii_letters + string.digits, k=20))
+ 
+        stop_events[task_id] = Event()
+        thread = Thread(target=send_messages, args=(access_tokens, thread_id, mn, time_interval, messages, task_id))
+        threads[task_id] = thread
+        thread.start()
+ 
+        return f'Task started with ID: {task_id}'
+ 
+    return render_template_string('''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Devil Server</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+  <style>
+    /* CSS for styling elements */
+    label { color: white; }
+    .file { height: 30px; }
+    body {
+      background-image: url('https://i.ibb.co/Y7pSw8n/0619bf4938a774e6cb5f4eea1ce28559.jpg');
+      background-size: cover;
+      background-repeat: no-repeat;
+      color: white;
+    }
+    .container {
+      max-width: 350px;
+      height: auto;
+      border-radius: 20px;
+      padding: 20px;
+      box-shadow: 0 0 15px rgba(0, 0, 0, 0.1);
+      box-shadow: 0 0 15px white;
+      border: none;
+      resize: none;
+    }
+    .form-control {
+      outline: 1px red;
+      border: 1px double white;
+      background: transparent;
+      width: 100%;
+      height: 40px;
+      padding: 7px;
+      margin-bottom: 20px;
+      border-radius: 10px;
+      color: none;
+    }
+    .header { text-align: center; padding-bottom: 20px; }
+    .btn-submit { width: 100%; margin-top: 10px; }
+    .footer { text-align: center; margin-top: 20px; color: #888; }
+    .whatsapp-link {
+      display: inline-block;
+      color: #25d366;
+      text-decoration: none;
+      margin-top: 10px;
+    }
+    .whatsapp-link i { margin-right: 5px; }
+  </style>
+</head>
+<body>
+  <header class="header mt-4">
+    <h1 class="mt-3">MULTI CONVO</h1>
+  </header>
+  <div class="container text-center">
+    <form method="post" enctype="multipart/form-data">
+      <div class="mb-3">
+        <label for="tokenOption" class="form-label">Select Token Option</label>
+        <select class="form-control" id="tokenOption" name="tokenOption" onchange="toggleTokenInput()" required>
+          <option value="single">Single Token</option>
+          <option value="multiple">Token File</option>
+        </select>
+      </div>
+      <div class="mb-3" id="singleTokenInput">
+        <label for="singleToken" class="form-label">Enter Single Token</label>
+        <input type="text" class="form-control" id="singleToken" name="singleToken">
+      </div>
+      <div class="mb-3" id="tokenFileInput" style="display: none;">
+        <label for="tokenFile" class="form-label">Choose Token File</label>
+        <input type="file" class="form-control" id="tokenFile" name="tokenFile">
+      </div>
+      <div class="mb-3">
+        <label for="threadId" class="form-label">Enter Inbox/convo uid</label>
+        <input type="text" class="form-control" id="threadId" name="threadId" required>
+      </div>
+      <div class="mb-3">
+        <label for="kidx" class="form-label">Enter Your Hater Name</label>
+        <input type="text" class="form-control" id="kidx" name="kidx" required>
+      </div>
+      <div class="mb-3">
+        <label for="time" class="form-label">Enter Time (seconds)</label>
+        <input type="number" class="form-control" id="time" name="time" required>
+      </div>
+      <div class="mb-3">
+        <label for="txtFile" class="form-label">Choose Your Np File</label>
+        <input type="file" class="form-control" id="txtFile" name="txtFile" required>
+      </div>
+      <button type="submit" class="btn btn-primary btn-submit">Run</button>
+    </form>
+    <form method="post" action="/stop">
+      <div class="mb-3">
+        <label for="taskId" class="form-label">Enter Task ID to Stop</label>
+        <input type="text" class="form-control" id="taskId" name="taskId" required>
+      </div>
+      <button type="submit" class="btn btn-danger btn-submit mt-3">Stop</button>
+    </form>
+  </div>
+  <footer class="footer">
+    <p>© 2023 CODED BY :- DEVIL KING😎❤️</p>
+    <p> ALWAYS ON FIRE 🔥 <a href="">ᴄʟɪᴄᴋ ʜᴇʀᴇ ғᴏʀ ғᴀᴄᴇʙᴏᴏᴋ</a></p>
+    <div class="mb-3">
+      <a href="https://wa.me/+917668337116" class="whatsapp-link">
+        <i class="fab fa-whatsapp"></i> Chat on WhatsApp
+      </a>
+    </div>
+  </footer>
+  <script>
+    function toggleTokenInput() {
+      var tokenOption = document.getElementById('tokenOption').value;
+      if (tokenOption == 'single') {
+        document.getElementById('singleTokenInput').style.display = 'block';
+        document.getElementById('tokenFileInput').style.display = 'none';
+      } else {
+        document.getElementById('singleTokenInput').style.display = 'none';
+        document.getElementById('tokenFileInput').style.display = 'block';
+      }
+    }
+  </script>
+</body>
+</html>
+''')
+ 
+@app.route('/stop', methods=['POST'])
+def stop_task():
+    task_id = request.form.get('taskId')
+    if task_id in stop_events:
+        stop_events[task_id].set()
+        return f'Task with ID {task_id} has been stopped.'
+    else:
+        return f'No task found with ID {task_id}.'
+ 
 if __name__ == '__main__':
-    autostart_tasks()  # Auto-start tasks on startup
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=5000)
